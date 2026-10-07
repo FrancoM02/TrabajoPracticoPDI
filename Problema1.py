@@ -20,8 +20,21 @@ def imshow(img, new_fig=True, title=None, color_img=False, blocking=False, color
         plt.show(block=blocking)
 
 
-RUTA_IMAGEN = "imagenes/Imagen_con_detalles_escondidos.tif"
-CARPETA_SALIDAS = "salidas"
+# Las rutas se arman respecto de la carpeta del script (funciona sin importar desde dónde se ejecute).
+# La imagen se busca junto al script o en la subcarpeta "imagenes", con el nombre del archivo entregado
+# o con el que figura en el enunciado.
+CARPETA_SCRIPT = os.path.dirname(os.path.abspath(__file__))
+NOMBRES_IMAGEN = ["Imagen_con_detalles_escondidos.tif", "Imagen_con_objetos_ocultos.tiff"]
+CARPETA_SALIDAS = os.path.join(CARPETA_SCRIPT, "salidas")
+
+
+def buscar_imagen():
+    for carpeta in (CARPETA_SCRIPT, os.path.join(CARPETA_SCRIPT, "imagenes")):
+        for nombre in NOMBRES_IMAGEN:
+            ruta = os.path.join(carpeta, nombre)
+            if os.path.isfile(ruta):
+                return ruta
+    raise FileNotFoundError(f"No se encontró {' ni '.join(NOMBRES_IMAGEN)} junto al script ni en la carpeta 'imagenes'")
 
 
 def ecualizacion_local_histograma(img, ventana):
@@ -32,10 +45,17 @@ def ecualizacion_local_histograma(img, ventana):
     #
     # Para cada pixel: se calcula el histograma de su ventana, se obtiene la transformación de
     # la ecualización (distribución acumulada * 255) y se aplica SOLO al pixel central.
-    if isinstance(ventana, int):
+    if img.ndim != 2 or img.dtype != np.uint8:
+        raise ValueError("La imagen debe ser 2D (escala de grises) y de tipo uint8")
+    if isinstance(ventana, (int, np.integer)):
         M, N = ventana, ventana
-    else:
+    elif isinstance(ventana, (tuple, list)) and len(ventana) == 2:
         M, N = ventana
+    else:
+        raise ValueError("La ventana debe ser un entero o una tupla (M, N) de enteros positivos")
+    if not all(isinstance(v, (int, np.integer)) and not isinstance(v, bool) for v in (M, N)):
+        raise ValueError("M y N deben ser enteros positivos")
+    M, N = int(M), int(N)
     if M < 1 or N < 1:
         raise ValueError("M y N deben ser enteros positivos")
 
@@ -62,23 +82,32 @@ def ecualizacion_local_histograma(img, ventana):
 if __name__ == "__main__":
     os.makedirs(CARPETA_SALIDAS, exist_ok=True)
 
-    img = cv2.imread(RUTA_IMAGEN, cv2.IMREAD_GRAYSCALE)
+    ruta_imagen = buscar_imagen()
+    img = cv2.imread(ruta_imagen, cv2.IMREAD_GRAYSCALE)
     if img is None:
-        raise FileNotFoundError(f"No se pudo leer la imagen: {RUTA_IMAGEN}")
+        raise FileNotFoundError(f"No se pudo leer la imagen: {ruta_imagen}")
     print(img.shape, img.dtype, np.unique(img))                 # Valores: 0 a 11 (objetos) y 226 a 228 (fondo)
-    imshow(img, title="Imagen Original", ticks=True)
 
-    #  Ecualización global (para comparar) 
+    #  Imagen original e histograma (escala logarítmica: hay solo dos grupos de valores)
+    plt.figure(figsize=(10, 4))
+    plt.subplot(121), imshow(img, new_fig=False, title="Imagen Original", colorbar=False)
+    plt.subplot(122), plt.bar(range(256), np.bincount(img.ravel(), minlength=256), width=1)
+    plt.yscale("log"), plt.xlim(-2, 257), plt.title("Histograma (escala logarítmica)"), plt.xlabel("Nivel de intensidad")
+    plt.tight_layout()
+    plt.savefig(os.path.join(CARPETA_SALIDAS, "histograma_original.png"), dpi=110)
+    plt.show(block=False)
+
+    #  Ecualización global (para comparar)
     img_eq = cv2.equalizeHist(img)
-    cv2.imwrite(f"{CARPETA_SALIDAS}/global.png", img_eq)
+    cv2.imwrite(os.path.join(CARPETA_SALIDAS, "global.png"), img_eq)
 
-    #  Ecualización local con diferentes tamaños de ventana 
+    #  Ecualización local con diferentes tamaños de ventana
     tamanos = [3, 7, 15, 25, 51, 101]
     resultados = {}
     for t in tamanos:
         print(f"Procesando ventana {t}x{t}...")
         resultados[t] = ecualizacion_local_histograma(img, t)
-        cv2.imwrite(f"{CARPETA_SALIDAS}/local_{t}x{t}.png", resultados[t])
+        cv2.imwrite(os.path.join(CARPETA_SALIDAS, f"local_{t}x{t}.png"), resultados[t])
 
     #Comparación 
     plt.figure()
@@ -88,5 +117,5 @@ if __name__ == "__main__":
     for k, t in enumerate(tamanos):
         plt.subplot(2, 4, k+3, sharex=ax, sharey=ax), imshow(resultados[t], new_fig=False, title=f"Local {t}x{t}", colorbar=False)
     plt.suptitle("Ecualización local de histograma - Influencia del tamaño de ventana")
-    plt.savefig(f"{CARPETA_SALIDAS}/comparacion_ventanas.png", dpi=110)
+    plt.savefig(os.path.join(CARPETA_SALIDAS, "comparacion_ventanas.png"), dpi=110)
     plt.show()

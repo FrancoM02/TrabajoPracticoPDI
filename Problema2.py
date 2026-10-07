@@ -23,8 +23,10 @@ def imshow(img, new_fig=True, title=None, color_img=False, blocking=False, color
 
 # Parámetros 
 
-CARPETA_IMAGENES = "imagenes"
-CARPETA_SALIDAS = "salidas"
+# Rutas relativas a la carpeta del script: las planillas se buscan junto al script o en "imagenes"
+CARPETA_SCRIPT = os.path.dirname(os.path.abspath(__file__))
+CARPETAS_IMAGENES = [CARPETA_SCRIPT, os.path.join(CARPETA_SCRIPT, "imagenes")]
+CARPETA_SALIDAS = os.path.join(CARPETA_SCRIPT, "salidas")
 IDS_PLANILLAS = [1, 2, 3, 4]           # Planillas a procesar (grade_sheet_<id>.png)
 CANTIDAD_REGISTROS = 20                # Filas de datos de cada planilla
 TH_LINEAS = 100                        # Umbral para detectar las lineas de la tabla (solo pixels casi negros)
@@ -36,6 +38,7 @@ AREA_MINIMA = 2                        # Area minima de una componente (el guion
 CONTAR_ESPACIOS_EN_NOMBRE = False      # True: los espacios cuentan para el maximo de 12 caracteres de "Nombre y apellido"
 CAMPOS = ["Legajo", "Nombre y apellido", "Parcial 1", "Parcial 2", "Parcial 3", "Condición Final"]
 MOSTRAR_FIGURAS = True
+MOSTRAR_PASOS_INTERMEDIOS = True       # Muestra (y guarda en salidas/) los pasos intermedios de la primera planilla
 
 
 
@@ -104,7 +107,7 @@ def extraer_caracteres(img, celda):
     # a derecha, y la imagen binaria de la celda (1 = tinta).
     y0, y1, x0, x1 = celda
     m = MARGEN_CELDA
-    celda_th = np.uint8(img[y0:y1, x0:x1] < TH_TEXTO)[m:-m, m:-m]
+    celda_th = np.uint8(img[y0 + m:y1 - m, x0 + m:x1 - m] < TH_TEXTO)
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(celda_th, connectivity=8, ltype=cv2.CV_32S)
     stats = stats[1:]                                   # Descartamos el fondo (etiqueta 0)
@@ -157,21 +160,33 @@ def validar_campo(indice_campo, cajas, paso):
 
 
 def clasificar_condicion(celda_th, caja):
-    # Distingue "A", "L" y "R" a partir de la forma de la letra (sin usar plantillas externas):
-    #   - "L" no tiene agujeros.
-    #   - "A" y "R" tienen un agujero. La "R" tiene el palo vertical a la izquierda (mucha tinta
-    #     en sus primeras columnas), mientras que la "A" tiene solo el pie de la pata.
+    # Distingue "A", "L" y "R" a partir de la forma de la letra (sin usar plantillas externas).
+    # Como la Condición Final puede tener cualquier caracter permitido (A-Z, 0-9, -, /), no alcanza
+    # con contar agujeros: se verifica la forma completa de la "L" y de la "R" y todo lo demás es "?".
+    #   - "L": sin agujeros, palo vertical a la izquierda, barra inferior y nada arriba a la derecha.
+    #   - "R": un agujero en la mitad de arriba, palo vertical a la izquierda y pata que llega
+    #          abajo a la derecha (la "P" no la tiene; la "D", el "0" y el "6" tienen el agujero más abajo).
+    #   - "A": un agujero y poca tinta en las 2 primeras columnas (solo el pie de la pata).
     x, y, w, h, area = caja
-    letra = celda_th[y:y + h, x:x + w]
+    letra = np.ascontiguousarray(celda_th[y:y + h, x:x + w])
     contornos, jerarquia = cv2.findContours(letra, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
-    agujeros = sum(1 for j in jerarquia[0] if j[3] != -1)        # Contornos que tienen "madre/padre"
+    agujeros = [c for c, j in zip(contornos, jerarquia[0]) if j[3] != -1]   # Contornos que tienen "madre/padre"
     tinta_izquierda = letra[:, :2].mean()                        # Fraccion de tinta en las 2 primeras columnas
-    if agujeros == 0:
-        return "L"
-    if agujeros == 1 and tinta_izquierda > 0.45:
-        return "R"
-    if agujeros == 1:
-        return "A"
+    palo_izquierdo = letra[:, :max(1, round(0.4 * w))].mean(axis=0).max()   # Columna mas llena del 40% izquierdo
+    if len(agujeros) == 0:
+        barra_inferior = letra[-max(1, round(h / 5)):, :].any(axis=0).mean()
+        arriba_derecha = (letra[:round(0.6 * h), round(0.75 * w):].any()
+                          or letra[round(0.15 * h):round(0.6 * h), round(w / 2):].mean() > 0.03)
+        if palo_izquierdo >= 0.95 and barra_inferior >= 0.9 and not arriba_derecha:
+            return "L"
+        return "?"
+    if len(agujeros) == 1:
+        _, y_agujero, _, h_agujero = cv2.boundingRect(agujeros[0])
+        pata = letra[round(0.75 * h):, round(0.75 * w):].any()
+        if palo_izquierdo >= 0.95 and y_agujero + h_agujero <= 0.65 * h and pata:
+            return "R"
+        if tinta_izquierda <= 0.45:
+            return "A"
     return "?"
 
 
@@ -193,7 +208,7 @@ def guardar_csv(resultados, ruta_csv):
             escritor.writerow([i + 1] + ["OK" if ok else "MAL" for ok in res])
 
 
-def generar_imagen_salida(img, celdas_nombre, no_aprobados):
+def generar_imagen_salida(img, celdas_nombre, no_aprobados, titulo="Alumnos que no aprobaron"):
     # no_aprobados: lista de (numero de registro, condicion "L" o "R")
     # Cada fila: numero de registro | crop del campo "Nombre y apellido" | indicador de color
     # Colores en BGR: naranja = debe recuperar (R) | rojo = libre (L)
@@ -203,8 +218,9 @@ def generar_imagen_salida(img, celdas_nombre, no_aprobados):
     ancho_numero, ancho_indicador, alto_titulo = 60, 170, 50
 
     if len(no_aprobados) == 0:
-        salida = np.full((120, 700, 3), 255, np.uint8)
-        cv2.putText(salida, "Sin alumnos que no hayan aprobado", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+        salida = np.full((140, 760, 3), 255, np.uint8)
+        cv2.putText(salida, titulo, (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+        cv2.putText(salida, "Ningun registro correcto con Condicion Final L o R", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
         return salida
 
     crops = []
@@ -228,16 +244,133 @@ def generar_imagen_salida(img, celdas_nombre, no_aprobados):
         cv2.line(fila, (0, alto - 1), (ancho_total, alto - 1), (180, 180, 180), 1)
         filas.append(fila)
 
-    titulo = np.full((alto_titulo, ancho_total, 3), 255, np.uint8)
-    cv2.putText(titulo, "Alumnos que no aprobaron", (12, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-    return np.vstack([titulo] + filas)
+    img_titulo = np.full((alto_titulo, ancho_total, 3), 255, np.uint8)
+    cv2.putText(img_titulo, titulo, (12, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+    return np.vstack([img_titulo] + filas)
+
+
+def unir_imagenes_salida(imagenes):
+    # Une las imagenes de salida de todas las planillas en una unica imagen (una debajo de la otra)
+    ancho = max(im.shape[1] for im in imagenes)
+    partes = [np.full((60, ancho, 3), 255, np.uint8)]
+    cv2.putText(partes[0], "Alumnos que no aprobaron - todas las planillas", (12, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
+    for im in imagenes:
+        separador = np.full((12, ancho, 3), 255, np.uint8)
+        separador[5:7, :] = (0, 0, 0)
+        partes += [separador, cv2.copyMakeBorder(im, 0, 0, 0, ancho - im.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255))]
+    return np.vstack(partes)
 
 
 
-#  Procesamiento de una planilla 
- 
+#  Pasos intermedios (figuras del informe)
+
+# Campos usados como ejemplo en la figura de casos particulares: (planilla, registro, campo)
+CASOS_EJEMPLO = [(1, 1, 0), (2, 19, 0), (3, 9, 0), (3, 15, 3), (2, 13, 1), (3, 8, 1)]
+
+
+def dibujar_caracteres(img, celda):
+    # Celda binaria con un rectangulo rojo sobre cada caracter (componente conectada) detectado
+    cajas, celda_th = extraer_caracteres(img, celda)
+    vista = cv2.cvtColor(celda_th * 255, cv2.COLOR_GRAY2RGB)
+    for x, y, w, h, a in cajas:
+        cv2.rectangle(vista, (x, y), (x + w - 1, y + h - 1), (255, 0, 0), 1)
+    return vista, cajas
+
+
+def mostrar_casos_particulares(planillas):
+    # planillas: {id: (img, registros, paso)} de las planillas ya procesadas
+    casos = [c for c in CASOS_EJEMPLO if c[0] in planillas]
+    if len(casos) == 0:
+        return
+    plt.figure(figsize=(9, 1.6 * len(casos)))
+    for k, (id_planilla, nro, campo) in enumerate(casos):
+        img, registros, paso = planillas[id_planilla]
+        vista, cajas = dibujar_caracteres(img, registros[nro - 1][campo])
+        n_caracteres, n_palabras, _ = analizar_campo(cajas, paso)
+        ok = validar_campo(campo, cajas, paso)
+        plt.subplot(len(casos), 1, k + 1)
+        imshow(vista, new_fig=False, color_img=True, colorbar=False,
+               title=f"Planilla {id_planilla} - Registro {nro} - {CAMPOS[campo]}: {n_caracteres} caracteres, "
+                     f"{n_palabras} palabra(s) -> {'OK' if ok else 'MAL'}")
+    plt.tight_layout()
+    plt.savefig(os.path.join(CARPETA_SALIDAS, "pasos_casos_particulares.png"), dpi=110)
+    plt.show(block=False)
+
+
+def mostrar_pasos_intermedios(img, id_planilla):
+    registros, lineas_h, lineas_v = detectar_celdas(img)
+    img_th = img < TH_LINEAS
+    img_rows, img_cols = np.sum(img_th, 1), np.sum(img_th, 0)
+
+    # 1) Lineas detectadas (horizontales en rojo, verticales en azul)
+    img_lineas = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    for y0, y1 in lineas_h:
+        img_lineas[y0:y1 + 1, :] = (255, 0, 0)
+    for x0, x1 in lineas_v:
+        img_lineas[:, x0:x1 + 1] = (0, 0, 255)
+    plt.figure(figsize=(8, 7))
+    imshow(img_lineas, new_fig=False, color_img=True, colorbar=False, title=f"Planilla {id_planilla} - Líneas detectadas")
+    plt.savefig(os.path.join(CARPETA_SALIDAS, f"pasos_lineas_grade_sheet_{id_planilla}.png"), dpi=110)
+    plt.show(block=False)
+
+    # 2) Suma de pixels oscuros por fila y por columna, con su umbral
+    plt.figure(figsize=(11, 4))
+    for k, (suma, frac, nombre, eje) in enumerate([(img_rows, FRACCION_LINEAS_H, "filas (líneas horizontales)", "Fila"),
+                                                   (img_cols, FRACCION_LINEAS_V, "columnas (líneas verticales)", "Columna")]):
+        plt.subplot(1, 2, k + 1)
+        plt.plot(suma), plt.axhline(frac * suma.max(), color="r", linestyle="--")
+        plt.title(f"Suma por {nombre}"), plt.xlabel(eje)
+    plt.tight_layout()
+    plt.savefig(os.path.join(CARPETA_SALIDAS, f"pasos_proyecciones_grade_sheet_{id_planilla}.png"), dpi=110)
+    plt.show(block=False)
+
+    # 3) Caracteres (componentes conectadas) detectados en los campos del registro 1
+    plt.figure(figsize=(8, 7))
+    for k, (nombre, celda) in enumerate(zip(CAMPOS, registros[0])):
+        vista, cajas = dibujar_caracteres(img, celda)
+        plt.subplot(len(CAMPOS), 1, k + 1)
+        imshow(vista, new_fig=False, color_img=True, colorbar=False, title=f"{nombre}: {len(cajas)} carácter(es)")
+    plt.suptitle(f"Planilla {id_planilla} - Registro 1: caracteres detectados")
+    plt.tight_layout()
+    plt.savefig(os.path.join(CARPETA_SALIDAS, f"pasos_caracteres_grade_sheet_{id_planilla}.png"), dpi=110)
+    plt.show(block=False)
+
+    # 4) Clasificacion de la Condicion Final: primer ejemplo de cada letra encontrada en la planilla
+    ejemplos = {}
+    for celdas in registros:
+        cajas, celda_th = extraer_caracteres(img, celdas[5])
+        if len(cajas) == 1:
+            letra = clasificar_condicion(celda_th, cajas[0])
+            if letra != "?" and letra not in ejemplos:
+                ejemplos[letra] = (celda_th, cajas[0])
+    plt.figure(figsize=(3 * max(1, len(ejemplos)), 3.5))
+    for k, letra in enumerate(sorted(ejemplos)):
+        celda_th, (x, y, w, h, a) = ejemplos[letra]
+        recorte = np.ascontiguousarray(celda_th[y:y + h, x:x + w])
+        _, jerarquia = cv2.findContours(recorte, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+        agujeros = sum(1 for j in jerarquia[0] if j[3] != -1)
+        plt.subplot(1, len(ejemplos), k + 1)
+        imshow(recorte, new_fig=False, colorbar=False,
+               title=f"Agujeros: {agujeros}\nTinta a la izquierda: {recorte[:, :2].mean():.2f}\n-> \"{letra}\"")
+    plt.tight_layout()
+    plt.savefig(os.path.join(CARPETA_SALIDAS, f"pasos_condicion_grade_sheet_{id_planilla}.png"), dpi=110)
+    plt.show(block=False)
+
+
+
+#  Procesamiento de una planilla
+
+def buscar_planilla(id_planilla):
+    nombre = f"grade_sheet_{id_planilla}.png"
+    for carpeta in CARPETAS_IMAGENES:
+        ruta = os.path.join(carpeta, nombre)
+        if os.path.isfile(ruta):
+            return ruta
+    raise FileNotFoundError(f"No se encontró {nombre} junto al script ni en la carpeta 'imagenes'")
+
+
 def validar_planilla(id_planilla):
-    ruta = f"{CARPETA_IMAGENES}/grade_sheet_{id_planilla}.png"
+    ruta = buscar_planilla(id_planilla)
     img = cv2.imread(ruta, cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(f"No se pudo leer la imagen: {ruta}")
@@ -265,12 +398,13 @@ def validar_planilla(id_planilla):
             if cond in ("L", "R"):
                 no_aprobados.append((i + 1, cond))
     celdas_nombre = [celdas[1] for celdas in registros]
-    img_salida = generar_imagen_salida(img, celdas_nombre, no_aprobados)
+    img_salida = generar_imagen_salida(img, celdas_nombre, no_aprobados,
+                                       titulo=f"Planilla {id_planilla} - Alumnos que no aprobaron")
 
-    #  Guardo salidas 
+    #  Guardo salidas
     os.makedirs(CARPETA_SALIDAS, exist_ok=True)
-    cv2.imwrite(f"{CARPETA_SALIDAS}/no_aprobados_grade_sheet_{id_planilla}.png", img_salida)
-    guardar_csv(resultados, f"{CARPETA_SALIDAS}/resultados_grade_sheet_{id_planilla}.csv")
+    cv2.imwrite(os.path.join(CARPETA_SALIDAS, f"no_aprobados_grade_sheet_{id_planilla}.png"), img_salida)
+    guardar_csv(resultados, os.path.join(CARPETA_SALIDAS, f"resultados_grade_sheet_{id_planilla}.csv"))
 
     return img, registros, resultados, no_aprobados, img_salida, paso
 
@@ -278,12 +412,18 @@ def validar_planilla(id_planilla):
 #  Aplicación cíclica sobre las planillas 
 
 if __name__ == "__main__":
+    imagenes_salida = []        # Imagen de no aprobados de cada planilla (para armar la imagen unica)
+    planillas = {}              # Datos de cada planilla (para la figura de casos particulares)
     for id_planilla in IDS_PLANILLAS:
         print("=" * 60)
         print(f"PLANILLA {id_planilla}  (grade_sheet_{id_planilla}.png)")
         print("=" * 60)
         img, registros, resultados, no_aprobados, img_salida, paso = validar_planilla(id_planilla)
+        imagenes_salida.append(img_salida)
+        planillas[id_planilla] = (img, registros, paso)
         mostrar_por_terminal(resultados)
+        if MOSTRAR_PASOS_INTERMEDIOS and id_planilla == IDS_PLANILLAS[0]:
+            mostrar_pasos_intermedios(img, id_planilla)
 
         n_correctos = sum(1 for res in resultados if all(res))
         print(f"Registros cargados correctamente: {n_correctos} de {CANTIDAD_REGISTROS}")
@@ -294,5 +434,14 @@ if __name__ == "__main__":
             imshow(cv2.cvtColor(img_salida, cv2.COLOR_BGR2RGB), color_img=True, colorbar=False,
                    title=f"Planilla {id_planilla} - Alumnos que no aprobaron")
 
+    #  Imagen unica con los alumnos que no aprobaron de todas las planillas
+    img_unica = unir_imagenes_salida(imagenes_salida)
+    cv2.imwrite(os.path.join(CARPETA_SALIDAS, "no_aprobados_todas_las_planillas.png"), img_unica)
     if MOSTRAR_FIGURAS:
+        imshow(cv2.cvtColor(img_unica, cv2.COLOR_BGR2RGB), color_img=True, colorbar=False,
+               title="Alumnos que no aprobaron - todas las planillas")
+    if MOSTRAR_PASOS_INTERMEDIOS:
+        mostrar_casos_particulares(planillas)
+
+    if MOSTRAR_FIGURAS or MOSTRAR_PASOS_INTERMEDIOS:
         plt.show()
