@@ -19,12 +19,10 @@ El informe con la descripción de los problemas, las técnicas utilizadas, captu
 ├── Problema2.py
 ├── informe_TP1.pdf
 ├── README.md
-├── TUIA_PDI_TP1_2026_C2.pdf               (enunciado)
-├── Imagen_con_detalles_escondidos.tif     (entrada del Problema 1)
-├── grade_sheet_1.png ... grade_sheet_4.png (entradas del Problema 2)
-├── grade_sheet_empty.png                  (planilla vacía de ejemplo)
-└── salidas/                               (la generan los scripts)
+└── TUIA_PDI_TP1_2026_C2.pdf   (enunciado)
 ```
+
+Como pide la cátedra, el repositorio contiene solo archivos `.py`, `.pdf` y `.md`. Las imágenes de entrada (las que provee el enunciado) no se incluyen y hay que copiarlas antes de ejecutar (ver "Preparación"). La carpeta `salidas/` la crean los scripts al ejecutarse.
 
 ## Requisitos y versiones utilizadas
 
@@ -50,7 +48,7 @@ pip install numpy==2.4.4 opencv-python==4.13.0 matplotlib==3.10.8
 
 ## Preparación
 
-Las imágenes de entrada se buscan en la misma carpeta que los scripts o dentro de una subcarpeta llamada `imagenes`. Las rutas se arman respecto de la carpeta del script, así que se pueden ejecutar desde cualquier directorio.
+Copiar las imágenes de entrada del enunciado en la misma carpeta que los scripts o dentro de una subcarpeta llamada `imagenes`. Las rutas se arman respecto de la carpeta del script, así que se pueden ejecutar desde cualquier directorio.
 
 | Script | Archivos necesarios |
 |---|---|
